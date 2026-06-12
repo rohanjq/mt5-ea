@@ -44,7 +44,8 @@ input int    INP_Slippage      = 20;       // Max slippage (points)
 input int    INP_MaxConsecLoss  = 3;       // Pause after N consecutive losses
 
 input group "=== External Control ==="
-input bool   INP_UseControlFile = true;    // Read ea_control.csv for switches
+input bool   INP_UseControlFile = false;   // Read ea_control.csv for switches
+input bool   INP_WriteStatusFile = false;  // Write ea_status.csv (disable for backtest)
 input int    INP_ControlPollSec = 5;       // Control file poll interval (sec)
 
 //=== Global State ====================================================
@@ -143,8 +144,11 @@ void OnTimer()
    }
 
    // Write status periodically
-   static int statusCounter = 0;
-   if(++statusCounter >= 10) { WriteStatusFile(); statusCounter = 0; }
+   if(INP_WriteStatusFile)
+   {
+      static int statusCounter = 0;
+      if(++statusCounter >= 10) { WriteStatusFile(); statusCounter = 0; }
+   }
 }
 
 //+------------------------------------------------------------------+
