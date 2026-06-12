@@ -19,7 +19,7 @@
 
 //=== Input Parameters ================================================
 input group "=== Risk Management ==="
-input double INP_RiskPct       = 5.0;      // Risk % of equity per trade
+input double INP_RiskPct       = 3.0;      // Risk % of equity per trade
 input double INP_SL_ShStar     = 7.5;      // SL dollars: shstar_m5_m15
 input double INP_SL_WickRej    = 5.0;      // SL dollars: dc_wick_rejection
 input double INP_RR_ShStar     = 1.0;      // Reward ratio: shstar_m5_m15
@@ -38,9 +38,10 @@ input bool   INP_Enable_WickRej  = true;   // Enable dc_wick_rejection
 
 input group "=== Trade Management ==="
 input int    INP_Magic          = 300;     // Magic number
-input int    INP_MaxDailyTrades = 30;      // Max trades per day
-input int    INP_CooldownSec   = 120;      // Cooldown between trades (sec)
+input int    INP_MaxDailyTrades = 10;      // Max trades per day
+input int    INP_CooldownSec   = 600;      // Cooldown between trades (sec)
 input int    INP_Slippage      = 20;       // Max slippage (points)
+input int    INP_MaxConsecLoss  = 3;       // Pause after N consecutive losses
 
 input group "=== External Control ==="
 input bool   INP_UseControlFile = true;    // Read ea_control.csv for switches
@@ -55,6 +56,7 @@ int            g_totalTrades      = 0;
 int            g_totalWins        = 0;
 int            g_totalLosses      = 0;
 double         g_totalPnL         = 0;
+int            g_consecLosses     = 0;
 
 // Indicator handles
 int            g_atr_m3_handle    = INVALID_HANDLE;
@@ -176,6 +178,14 @@ void OnTick()
    int cooldown = (g_cooldownSec > 0) ? g_cooldownSec : INP_CooldownSec;
    if(TimeCurrent() - g_lastTradeTime < cooldown) return;
 
+   // Consecutive loss pause
+   if(g_consecLosses >= INP_MaxConsecLoss)
+   {
+      // Reset after extended cooldown (30 min per consecutive loss)
+      if(TimeCurrent() - g_lastTradeTime < g_consecLosses * 1800) return;
+      g_consecLosses = 0; // reset after cooldown served
+   }
+
    // Only evaluate on new closed bar (M5 timeframe drives the main loop)
    static datetime lastBarTime = 0;
    datetime currentBarTime = iTime(_Symbol, PERIOD_M5, 0);
@@ -231,8 +241,8 @@ void OnTrade()
       double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
       g_totalTrades++;
       g_totalPnL += profit;
-      if(profit >= 0) g_totalWins++;
-      else g_totalLosses++;
+      if(profit >= 0) { g_totalWins++; g_consecLosses = 0; }
+      else { g_totalLosses++; g_consecLosses++; }
 
       string resultStr = (profit >= 0) ? "WIN" : "LOSS";
       Print("Trade CLOSED: ", resultStr, " $", DoubleToString(profit, 2),
