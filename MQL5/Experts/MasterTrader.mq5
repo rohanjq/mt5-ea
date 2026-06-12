@@ -1,12 +1,11 @@
 //+------------------------------------------------------------------+
-//| MasterTrader.mq5 — Full trading system with expression engine    |
-//| All indicators computed natively. Strategies defined as inputs.  |
-//| 15 strategies ported from mt5-trader config-gold.yaml            |
+//| MasterTrader.mq5 — Expression-based multi-strategy EA            |
+//| v2.1 — Clean signal naming, running candle, all indicators       |
 //+------------------------------------------------------------------+
 #property copyright "mt5-ea"
-#property version   "2.00"
+#property version   "2.10"
 #property strict
-#property description "Master EA with expression-based strategies, trailing stop, per-strategy stats"
+#property description "Expression engine, 15+5 strategies, per-strategy stats"
 
 #include <Trade/Trade.mqh>
 
@@ -17,7 +16,7 @@
 input group "=== Global Risk ==="
 input double INP_RiskPct        = 3.0;     // Risk % of equity per trade
 input double INP_GlobalSL       = 7.5;     // Default SL (dollars) if strategy SL=0
-input double INP_GlobalRR       = 1.0;     // Default reward ratio if strategy RR=0
+input double INP_GlobalRR       = 1.0;     // Default reward:risk if strategy RR=0
 
 input group "=== Trade Management ==="
 input int    INP_Magic          = 300;     // Magic number
@@ -25,15 +24,15 @@ input bool   INP_MultiPosition  = false;   // Allow multiple positions
 input int    INP_MaxPositions   = 1;       // Max simultaneous positions
 input int    INP_MaxDailyTrades = 15;      // Max trades per day
 input int    INP_CooldownSec   = 300;      // Cooldown between trades (sec)
-input int    INP_ReversalCooldown = 300;   // No reversal trade for X seconds
+input int    INP_ReversalCooldown = 300;   // Reversal cooldown (sec)
 input int    INP_MaxConsecLoss  = 3;       // Pause after N consec losses (0=off)
-input int    INP_ConsecLossPause = 1800;   // Pause duration per consec loss (sec)
+input int    INP_ConsecLossPause = 1800;   // Pause per consec loss (sec)
 input int    INP_Slippage      = 20;       // Max slippage (points)
 
 input group "=== Trailing Stop ==="
 input double INP_BreakevenStart = 0.0;     // Move SL to entry after $X profit (0=off)
 input double INP_TrailStart     = 0.0;     // Start trailing after $X profit (0=off)
-input double INP_TrailStep      = 2.0;     // Trailing distance (dollars)
+input double INP_TrailStep      = 2.0;     // Trail distance (dollars)
 
 input group "=== Indicator Parameters ==="
 input int    INP_UTBot_Period   = 10;      // UT Bot ATR period
@@ -45,43 +44,55 @@ input bool   INP_UseControlFile  = false;  // Read ea_control.csv
 input bool   INP_WriteStatusFile = false;  // Write ea_status.csv
 input int    INP_ControlPollSec  = 5;      // Poll interval (sec)
 
-//--- Strategy inputs: 15 strategies from config-gold + 5 empty slots
-//--- Conditions: pipe-separated. Operators: == != >= <= > < in not_in
-//--- Example: utbot_M15.closed_bias==BEARISH|candle_M5.closed_candle_type==SHOOTING_STAR
+// ─── Signal key reference ───────────────────────────────────────────
+// utbot_TF   : .bias .signal .bullish_since .bearish_since
+// dc_TF      : .zone .upper_wick_rej .lower_wick_rej .width
+// emaX_TF    : .price_vs .slope .value       (X = 9/21/50/200)
+// rsiX_TF    : .value .zone                  (X = 2/14)
+// adx_TF     : .value .strength .di_bias
+// macd_TF    : .cross .hist_dir .vs_zero
+// stoch_TF   : .k .zone
+// bb_TF      : .squeeze .reenter_below
+// atr_TF     : .value
+// vwap_TF    : .price_vs .value
+// candle_TF  : .type .dir .is_bullish .is_bearish
+//              .upper_wick_ratio .lower_wick_ratio .body_pct
+//              .live_*  (same fields on running bar)
+// ────────────────────────────────────────────────────────────────────
 
 input group "=== S01: dc_wick_rejection ==="
 input bool   S01_On   = true;
 input double S01_SL   = 5.0;
 input double S01_RR   = 1.0;
-input string S01_Buy  = "dc_M15.closed_lower_wick_rej==TRUE|utbot_M3.closed_bias==BULLISH";
-input string S01_Sell = "dc_M15.closed_upper_wick_rej==TRUE|utbot_M3.closed_bias==BEARISH";
+input string S01_Buy  = "dc_M15.lower_wick_rej==TRUE|utbot_M3.bias==BULLISH";
+input string S01_Sell = "dc_M15.upper_wick_rej==TRUE|utbot_M3.bias==BEARISH";
 
 input group "=== S02: trend_2w_m2_ema50_bounce2_vwap ==="
 input bool   S02_On   = true;
 input double S02_SL   = 7.5;
 input double S02_RR   = 1.0;
 input string S02_Buy  = "";
-input string S02_Sell = "utbot_M2.closed_signal==SELL|ema50_M5.closed_price_vs_ema==BELOW|utbot_M5.consecutive_bull_bars>=2|vwap_M1.closed_price_vs_vwap==BELOW";
+input string S02_Sell = "utbot_M2.signal==SELL|ema50_M5.price_vs==BELOW|utbot_M5.bullish_since>=2|vwap_M1.price_vs==BELOW";
 
 input group "=== S03: trend_2w_m2_m15bear_bounce2_vwap ==="
 input bool   S03_On   = true;
 input double S03_SL   = 7.5;
 input double S03_RR   = 1.0;
 input string S03_Buy  = "";
-input string S03_Sell = "utbot_M2.closed_signal==SELL|utbot_M15.closed_bias==BEARISH|utbot_M5.consecutive_bull_bars>=2|vwap_M1.closed_price_vs_vwap==BELOW";
+input string S03_Sell = "utbot_M2.signal==SELL|utbot_M15.bias==BEARISH|utbot_M5.bullish_since>=2|vwap_M1.price_vs==BELOW";
 
 input group "=== S04: dc2w_m3_h1bear_dcupper_vwap ==="
 input bool   S04_On   = true;
 input double S04_SL   = 7.5;
 input double S04_RR   = 1.0;
 input string S04_Buy  = "";
-input string S04_Sell = "utbot_M3.closed_signal==SELL|utbot_H1.closed_bias==BEARISH|dc_M15.closed_price_zone in UPPER,UPPER_MID|vwap_M1.closed_price_vs_vwap==BELOW";
+input string S04_Sell = "utbot_M3.signal==SELL|utbot_H1.bias==BEARISH|dc_M15.zone in UPPER,UPPER_MID|vwap_M1.price_vs==BELOW";
 
 input group "=== S05: hammer_2w_m15_dc ==="
 input bool   S05_On   = true;
 input double S05_SL   = 7.5;
 input double S05_RR   = 1.0;
-input string S05_Buy  = "candle_M3.closed_candle_type==HAMMER|utbot_M5.consecutive_bear_bars>=2|utbot_M15.closed_bias==BULLISH|dc_M15.closed_price_zone in LOWER,LOWER_MID";
+input string S05_Buy  = "candle_M3.type==HAMMER|utbot_M5.bearish_since>=2|utbot_M15.bias==BULLISH|dc_M15.zone in LOWER,LOWER_MID";
 input string S05_Sell = "";
 
 input group "=== S06: doji_dc_upper_m15 ==="
@@ -89,27 +100,27 @@ input bool   S06_On   = true;
 input double S06_SL   = 7.5;
 input double S06_RR   = 1.0;
 input string S06_Buy  = "";
-input string S06_Sell = "candle_M3.closed_candle_type==DOJI|dc_M15.closed_price_zone in UPPER,UPPER_MID|utbot_M15.closed_bias==BEARISH";
+input string S06_Sell = "candle_M3.type==DOJI|dc_M15.zone in UPPER,UPPER_MID|utbot_M15.bias==BEARISH";
 
 input group "=== S07: shstar_m5_m15 ==="
 input bool   S07_On   = true;
 input double S07_SL   = 7.5;
 input double S07_RR   = 1.0;
 input string S07_Buy  = "";
-input string S07_Sell = "candle_M5.closed_candle_type==SHOOTING_STAR|utbot_M15.closed_bias==BEARISH";
+input string S07_Sell = "candle_M5.type==SHOOTING_STAR|utbot_M15.bias==BEARISH";
 
 input group "=== S08: wick2x_dc_h1_vwap_sell ==="
 input bool   S08_On   = true;
 input double S08_SL   = 7.5;
 input double S08_RR   = 1.0;
 input string S08_Buy  = "";
-input string S08_Sell = "candle_M3.closed_upper_wick_ratio>=2|candle_M3.closed_is_bearish==TRUE|dc_M15.closed_price_zone in UPPER,UPPER_MID|utbot_H1.closed_bias==BEARISH|vwap_M1.closed_price_vs_vwap==BELOW";
+input string S08_Sell = "candle_M3.upper_wick_ratio>=2|candle_M3.is_bearish==TRUE|dc_M15.zone in UPPER,UPPER_MID|utbot_H1.bias==BEARISH|vwap_M1.price_vs==BELOW";
 
 input group "=== S09: dc_mid_hammer_2w_m15 ==="
 input bool   S09_On   = true;
 input double S09_SL   = 7.5;
 input double S09_RR   = 1.0;
-input string S09_Buy  = "dc_M5.closed_price_zone==MIDDLE|utbot_M5.consecutive_bear_bars>=2|candle_M3.closed_candle_type==HAMMER|utbot_M15.closed_bias==BULLISH";
+input string S09_Buy  = "dc_M5.zone==MIDDLE|utbot_M5.bearish_since>=2|candle_M3.type==HAMMER|utbot_M15.bias==BULLISH";
 input string S09_Sell = "";
 
 input group "=== S10: dc_mid_shstar_2w_m15 ==="
@@ -117,13 +128,13 @@ input bool   S10_On   = true;
 input double S10_SL   = 7.5;
 input double S10_RR   = 1.0;
 input string S10_Buy  = "";
-input string S10_Sell = "dc_M5.closed_price_zone==MIDDLE|utbot_M5.consecutive_bull_bars>=2|candle_M3.closed_candle_type==SHOOTING_STAR|utbot_M15.closed_bias==BEARISH";
+input string S10_Sell = "dc_M5.zone==MIDDLE|utbot_M5.bullish_since>=2|candle_M3.type==SHOOTING_STAR|utbot_M15.bias==BEARISH";
 
 input group "=== S11: dc_lowmid_hammer_2w_m15 ==="
 input bool   S11_On   = true;
 input double S11_SL   = 7.5;
 input double S11_RR   = 1.0;
-input string S11_Buy  = "dc_M5.closed_price_zone in LOWER_MID,MIDDLE|utbot_M5.consecutive_bear_bars>=2|candle_M3.closed_candle_type==HAMMER|utbot_M15.closed_bias==BULLISH";
+input string S11_Buy  = "dc_M5.zone in LOWER_MID,MIDDLE|utbot_M5.bearish_since>=2|candle_M3.type==HAMMER|utbot_M15.bias==BULLISH";
 input string S11_Sell = "";
 
 input group "=== S12: dc_upmid_shstar_2w_m15 ==="
@@ -131,27 +142,27 @@ input bool   S12_On   = true;
 input double S12_SL   = 7.5;
 input double S12_RR   = 1.0;
 input string S12_Buy  = "";
-input string S12_Sell = "dc_M5.closed_price_zone in UPPER_MID,MIDDLE|utbot_M5.consecutive_bull_bars>=2|candle_M3.closed_candle_type==SHOOTING_STAR|utbot_M15.closed_bias==BEARISH";
+input string S12_Sell = "dc_M5.zone in UPPER_MID,MIDDLE|utbot_M5.bullish_since>=2|candle_M3.type==SHOOTING_STAR|utbot_M15.bias==BEARISH";
 
 input group "=== S13: rsi2_mean_rev_full ==="
 input bool   S13_On   = true;
 input double S13_SL   = 3.0;
 input double S13_RR   = 1.5;
-input string S13_Buy  = "rsi2_M5.closed_zone==EXTREME_OS|ema200_M15.closed_price_vs_ema==ABOVE|adx14_M15.closed_trend_strength in STRONG_TREND,TRENDING|utbot_H1.closed_bias==BULLISH";
+input string S13_Buy  = "rsi2_M5.zone==EXTREME_OS|ema200_M15.price_vs==ABOVE|adx_M15.strength in STRONG_TREND,TRENDING|utbot_H1.bias==BULLISH";
 input string S13_Sell = "";
 
 input group "=== S14: ema50_dc_wick_h1 ==="
 input bool   S14_On   = true;
 input double S14_SL   = 3.0;
 input double S14_RR   = 2.0;
-input string S14_Buy  = "ema50_M15.ema_slope==RISING|dc_M15.closed_lower_wick_rej==TRUE|utbot_H1.closed_bias==BULLISH";
+input string S14_Buy  = "ema50_M15.slope==RISING|dc_M15.lower_wick_rej==TRUE|utbot_H1.bias==BULLISH";
 input string S14_Sell = "";
 
 input group "=== S15: rsi2_dc_wick ==="
 input bool   S15_On   = true;
 input double S15_SL   = 3.0;
 input double S15_RR   = 1.0;
-input string S15_Buy  = "rsi2_M5.closed_zone==EXTREME_OS|ema200_M15.closed_price_vs_ema==ABOVE|dc_M15.closed_lower_wick_rej==TRUE";
+input string S15_Buy  = "rsi2_M5.zone==EXTREME_OS|ema200_M15.price_vs==ABOVE|dc_M15.lower_wick_rej==TRUE";
 input string S15_Sell = "";
 
 input group "=== S16: (custom) ==="
@@ -193,7 +204,7 @@ input string S20_Sell = "";
 //  SECTION 2: CONSTANTS & STRUCTURES
 //=====================================================================
 #define NUM_TF       11
-#define MAX_SIGNALS  600
+#define MAX_SIGNALS  700
 #define MAX_STRAT    20
 #define LOOKBACK     200
 
@@ -222,10 +233,9 @@ struct Strategy
 //=====================================================================
 //  SECTION 3: GLOBAL STATE
 //=====================================================================
-
 CTrade         g_trade;
 datetime       g_lastTradeTime   = 0;
-int            g_lastTradeDir    = 0;
+int            g_lastTradeDir    = 0;       // 1=BUY, -1=SELL
 int            g_dailyTradeCount = 0;
 datetime       g_lastDay         = 0;
 int            g_consecLosses    = 0;
@@ -250,6 +260,7 @@ datetime       g_lastBarTime[NUM_TF];
 Strategy       g_strats[MAX_STRAT];
 int            g_stratCount = 0;
 
+// Indicator handles per timeframe
 int g_h_utbot_atr[NUM_TF];
 int g_h_ema9[NUM_TF];
 int g_h_ema21[NUM_TF];
@@ -261,7 +272,7 @@ int g_h_adx[NUM_TF];
 int g_h_macd[NUM_TF];
 int g_h_stoch[NUM_TF];
 int g_h_bb[NUM_TF];
-int g_h_atr14[NUM_TF];
+int g_h_atr[NUM_TF];
 
 //=====================================================================
 //  SECTION 4: INITIALIZATION
@@ -283,17 +294,17 @@ int OnInit()
    {
       ENUM_TIMEFRAMES tf = g_tfs[i];
       g_h_utbot_atr[i] = iATR(_Symbol, tf, INP_UTBot_Period);
-      g_h_ema9[i]      = iMA(_Symbol, tf, 9, 0, MODE_EMA, PRICE_CLOSE);
-      g_h_ema21[i]     = iMA(_Symbol, tf, 21, 0, MODE_EMA, PRICE_CLOSE);
-      g_h_ema50[i]     = iMA(_Symbol, tf, 50, 0, MODE_EMA, PRICE_CLOSE);
+      g_h_ema9[i]      = iMA(_Symbol, tf, 9,   0, MODE_EMA, PRICE_CLOSE);
+      g_h_ema21[i]     = iMA(_Symbol, tf, 21,  0, MODE_EMA, PRICE_CLOSE);
+      g_h_ema50[i]     = iMA(_Symbol, tf, 50,  0, MODE_EMA, PRICE_CLOSE);
       g_h_ema200[i]    = iMA(_Symbol, tf, 200, 0, MODE_EMA, PRICE_CLOSE);
       g_h_rsi14[i]     = iRSI(_Symbol, tf, 14, PRICE_CLOSE);
-      g_h_rsi2[i]      = iRSI(_Symbol, tf, 2, PRICE_CLOSE);
+      g_h_rsi2[i]      = iRSI(_Symbol, tf, 2,  PRICE_CLOSE);
       g_h_adx[i]       = iADX(_Symbol, tf, 14);
       g_h_macd[i]      = iMACD(_Symbol, tf, 12, 26, 9, PRICE_CLOSE);
       g_h_stoch[i]     = iStochastic(_Symbol, tf, 5, 3, 3, MODE_SMA, STO_LOWHIGH);
       g_h_bb[i]        = iBands(_Symbol, tf, 20, 0, 2.0, PRICE_CLOSE);
-      g_h_atr14[i]     = iATR(_Symbol, tf, 14);
+      g_h_atr[i]       = iATR(_Symbol, tf, 14);
       g_lastBarTime[i] = 0;
    }
 
@@ -304,8 +315,8 @@ int OnInit()
    for(int i = 0; i < g_stratCount; i++)
       if(g_strats[i].enabled) enabled++;
 
-   Print("MasterTrader v2 started: ", _Symbol,
-         " | Strategies: ", enabled, "/", g_stratCount,
+   Print("MasterTrader v2.1 | ", _Symbol,
+         " | Strats: ", enabled, "/", g_stratCount,
          " | Risk: ", INP_RiskPct, "%",
          " | Magic: ", INP_Magic);
 
@@ -329,25 +340,22 @@ void OnDeinit(const int reason)
       if(g_h_macd[i]      != INVALID_HANDLE) IndicatorRelease(g_h_macd[i]);
       if(g_h_stoch[i]     != INVALID_HANDLE) IndicatorRelease(g_h_stoch[i]);
       if(g_h_bb[i]        != INVALID_HANDLE) IndicatorRelease(g_h_bb[i]);
-      if(g_h_atr14[i]     != INVALID_HANDLE) IndicatorRelease(g_h_atr14[i]);
+      if(g_h_atr[i]       != INVALID_HANDLE) IndicatorRelease(g_h_atr[i]);
    }
 
-   Print("═══════════════ STRATEGY RESULTS ═══════════════");
+   Print("=========== STRATEGY RESULTS ===========");
    for(int i = 0; i < g_stratCount; i++)
    {
       if(!g_strats[i].enabled || g_strats[i].totalTrades == 0) continue;
-      double wr = (g_strats[i].totalTrades > 0)
-         ? (double)g_strats[i].wins / g_strats[i].totalTrades * 100.0 : 0;
-      Print(StringFormat("  %-35s  W:%-3d L:%-3d WR:%.0f%%  PnL: $%.2f",
-            g_strats[i].name,
-            g_strats[i].wins, g_strats[i].losses,
-            wr, g_strats[i].pnl));
+      double wr = (double)g_strats[i].wins / g_strats[i].totalTrades * 100.0;
+      Print(StringFormat("  %-35s  W:%-3d L:%-3d  WR:%.0f%%  PnL:$%.2f",
+            g_strats[i].name, g_strats[i].wins, g_strats[i].losses, wr, g_strats[i].pnl));
    }
    double totalWR = (g_totalTrades > 0)
       ? (double)g_totalWins / g_totalTrades * 100.0 : 0;
-   Print(StringFormat("  TOTAL: %d trades  W:%d L:%d  WR:%.0f%%  PnL: $%.2f",
+   Print(StringFormat("  TOTAL: %d trades  W:%d L:%d  WR:%.0f%%  PnL:$%.2f",
          g_totalTrades, g_totalWins, g_totalLosses, totalWR, g_totalPnL));
-   Print("═══════════════════════════════════════════════");
+   Print("========================================");
 }
 
 void LoadStrategies()
@@ -412,12 +420,11 @@ void OnTimer()
 
 void OnTick()
 {
-   // 1. Trailing stop on every tick
+   // 1. Trailing stop — every tick
    if(INP_TrailStart > 0 || INP_BreakevenStart > 0)
       ManageTrailingStop();
 
-   // 2. Detect new bars, recompute signals
-   bool anyNewBar = false;
+   // 2. Recompute indicator signals on new bars
    for(int i = 0; i < NUM_TF; i++)
    {
       datetime barTime = iTime(_Symbol, g_tfs[i], 0);
@@ -425,18 +432,23 @@ void OnTick()
       {
          g_lastBarTime[i] = barTime;
          ComputeAllSignals(i);
-         anyNewBar = true;
       }
    }
-   if(!anyNewBar) return;
 
-   // 3. Reset daily counter
+   // 3. Running candle — every tick, all sub-daily TFs
+   for(int i = 0; i < NUM_TF; i++)
+   {
+      if(g_tfs[i] >= PERIOD_D1) continue;
+      ComputeCandleForBar(i, 0, "live_");
+   }
+
+   // 4. Daily counter reset
    MqlDateTime dt;
    TimeCurrent(dt);
    datetime today = StringToTime(StringFormat("%d.%02d.%02d", dt.year, dt.mon, dt.day));
    if(today != g_lastDay) { g_dailyTradeCount = 0; g_lastDay = today; }
 
-   // 4. Trading filters
+   // 5. Trading filters
    if(!g_tradingEnabled) return;
 
    int openPos = CountOpenPositions();
@@ -453,31 +465,27 @@ void OnTick()
       g_consecLosses = 0;
    }
 
-   // 5. Evaluate strategies
+   // 6. Evaluate strategies
    for(int s = 0; s < g_stratCount; s++)
    {
       if(!g_strats[s].enabled) continue;
 
-      if(g_buyEnabled && StringLen(g_strats[s].buyCond) > 0)
+      if(g_buyEnabled && StringLen(g_strats[s].buyCond) > 0
+         && EvalAllConditions(g_strats[s].buyCond))
       {
-         if(EvalAllConditions(g_strats[s].buyCond))
-         {
-            if(g_lastTradeDir == -1 && now - g_lastTradeTime < INP_ReversalCooldown)
-               continue;
-            ExecuteTrade(s, ORDER_TYPE_BUY);
-            return;
-         }
+         if(g_lastTradeDir == -1 && now - g_lastTradeTime < INP_ReversalCooldown)
+            continue;
+         ExecuteTrade(s, ORDER_TYPE_BUY);
+         return;
       }
 
-      if(g_sellEnabled && StringLen(g_strats[s].sellCond) > 0)
+      if(g_sellEnabled && StringLen(g_strats[s].sellCond) > 0
+         && EvalAllConditions(g_strats[s].sellCond))
       {
-         if(EvalAllConditions(g_strats[s].sellCond))
-         {
-            if(g_lastTradeDir == 1 && now - g_lastTradeTime < INP_ReversalCooldown)
-               continue;
-            ExecuteTrade(s, ORDER_TYPE_SELL);
-            return;
-         }
+         if(g_lastTradeDir == 1 && now - g_lastTradeTime < INP_ReversalCooldown)
+            continue;
+         ExecuteTrade(s, ORDER_TYPE_SELL);
+         return;
       }
    }
 }
@@ -506,7 +514,7 @@ void OnTrade()
             g_strats[s].totalTrades++;
             g_strats[s].pnl += profit;
             if(profit >= 0) g_strats[s].wins++;
-            else g_strats[s].losses++;
+            else            g_strats[s].losses++;
             break;
          }
       }
@@ -531,21 +539,22 @@ void ComputeAllSignals(int tf_idx)
 {
    ComputeUTBot(tf_idx);
    ComputeDC(tf_idx);
-   ComputeEMA(tf_idx, 9,   g_h_ema9[tf_idx],   "ema9");
-   ComputeEMA(tf_idx, 21,  g_h_ema21[tf_idx],  "ema21");
-   ComputeEMA(tf_idx, 50,  g_h_ema50[tf_idx],  "ema50");
-   ComputeEMA(tf_idx, 200, g_h_ema200[tf_idx], "ema200");
-   ComputeRSI(tf_idx, 14,  g_h_rsi14[tf_idx],  "rsi14");
-   ComputeRSI(tf_idx, 2,   g_h_rsi2[tf_idx],   "rsi2");
+   ComputeEMA(tf_idx, g_h_ema9[tf_idx],   "ema9");
+   ComputeEMA(tf_idx, g_h_ema21[tf_idx],  "ema21");
+   ComputeEMA(tf_idx, g_h_ema50[tf_idx],  "ema50");
+   ComputeEMA(tf_idx, g_h_ema200[tf_idx], "ema200");
+   ComputeRSI(tf_idx, 14, g_h_rsi14[tf_idx], "rsi14");
+   ComputeRSI(tf_idx, 2,  g_h_rsi2[tf_idx],  "rsi2");
    ComputeADX(tf_idx);
    ComputeMACD(tf_idx);
    ComputeStoch(tf_idx);
    ComputeBB(tf_idx);
-   ComputeATRSignal(tf_idx);
+   ComputeATR(tf_idx);
    ComputeVWAP(tf_idx);
-   ComputeCandle(tf_idx);
+   ComputeCandleForBar(tf_idx, 1, "");   // closed bar
 }
 
+//--- UT Bot: ATR trailing stop crossover
 void ComputeUTBot(int tf_idx)
 {
    ENUM_TIMEFRAMES tf = g_tfs[tf_idx];
@@ -560,6 +569,7 @@ void ComputeUTBot(int tf_idx)
    if(CopyClose(_Symbol, tf, 0, total, cl) < total) return;
    if(CopyBuffer(handle, 0, 0, total, atr) < total) return;
 
+   // Build trailing stop + direction arrays
    double trail[], dir[];
    ArrayResize(trail, total);
    ArrayResize(dir, total);
@@ -585,96 +595,105 @@ void ComputeUTBot(int tf_idx)
       }
    }
 
-   int cls = total - 2, prev = total - 3;
-   string prefix = "utbot_" + tn;
+   int cls  = total - 2;   // closed bar
+   int prev = total - 3;
+   string pfx = "utbot_" + tn;
 
-   SigSet(prefix + ".closed_bias", (dir[cls] > 0) ? "BULLISH" : "BEARISH");
+   // Bias
+   SigSet(pfx + ".bias", (dir[cls] > 0) ? "BULLISH" : "BEARISH");
 
+   // Signal (one-bar flash on direction change)
    string signal = "NONE";
    if(prev >= 0)
    {
       if(dir[cls] > 0 && dir[prev] < 0) signal = "BUY";
       if(dir[cls] < 0 && dir[prev] > 0) signal = "SELL";
    }
-   SigSet(prefix + ".closed_signal", signal);
+   SigSet(pfx + ".signal", signal);
 
-   int cbull = 0, cbear = 0;
-   for(int i = total - 1; i >= 0; i--)
+   // Bars since bias turned (count from closed bar backwards)
+   int bullSince = 0, bearSince = 0;
+   for(int i = cls; i >= 0; i--)
    {
-      if(dir[i] > 0) { if(cbear > 0) break; cbull++; }
-      else           { if(cbull > 0) break; cbear++; }
+      if(dir[i] > 0) { if(bearSince > 0) break; bullSince++; }
+      else           { if(bullSince > 0) break; bearSince++; }
    }
-   SigSet(prefix + ".consecutive_bull_bars", IntegerToString(cbull));
-   SigSet(prefix + ".consecutive_bear_bars", IntegerToString(cbear));
+   SigSet(pfx + ".bullish_since", IntegerToString(bullSince));
+   SigSet(pfx + ".bearish_since", IntegerToString(bearSince));
 }
 
+//--- Donchian Channel
 void ComputeDC(int tf_idx)
 {
    ENUM_TIMEFRAMES tf = g_tfs[tf_idx];
    string tn = g_tfNames[tf_idx];
-   int length = INP_DC_Length;
 
-   if(Bars(_Symbol, tf) < length + 2) return;
+   if(Bars(_Symbol, tf) < INP_DC_Length + 2) return;
 
    double highs[], lows[];
-   if(CopyHigh(_Symbol, tf, 1, length, highs) < length) return;
-   if(CopyLow(_Symbol, tf, 1, length, lows) < length) return;
+   if(CopyHigh(_Symbol, tf, 1, INP_DC_Length, highs) < INP_DC_Length) return;
+   if(CopyLow(_Symbol, tf, 1, INP_DC_Length, lows) < INP_DC_Length) return;
 
    double upper = highs[ArrayMaximum(highs)];
    double lower = lows[ArrayMinimum(lows)];
    double width = upper - lower;
 
-   double cls_open  = iOpen(_Symbol, tf, 1);
-   double cls_high  = iHigh(_Symbol, tf, 1);
-   double cls_low   = iLow(_Symbol, tf, 1);
-   double cls_close = iClose(_Symbol, tf, 1);
+   double o = iOpen(_Symbol, tf, 1);
+   double h = iHigh(_Symbol, tf, 1);
+   double l = iLow(_Symbol, tf, 1);
+   double c = iClose(_Symbol, tf, 1);
 
-   double pct = (width > 0) ? (cls_close - lower) / width * 100.0 : 50.0;
-   string zone = "MIDDLE";
+   // Zone classification
+   double pct = (width > 0) ? (c - lower) / width * 100.0 : 50.0;
+   string zone;
    if(pct >= 80)      zone = "UPPER";
    else if(pct >= 60) zone = "UPPER_MID";
    else if(pct >= 40) zone = "MIDDLE";
    else if(pct >= 20) zone = "LOWER_MID";
    else               zone = "LOWER";
 
-   double body_top    = MathMax(cls_open, cls_close);
-   double body_bottom = MathMin(cls_open, cls_close);
-   double upper_wick  = cls_high - body_top;
-   double lower_wick  = body_bottom - cls_low;
+   // Wick rejection
+   double body_top    = MathMax(o, c);
+   double body_bottom = MathMin(o, c);
    double body_size   = body_top - body_bottom;
+   double upper_wick  = h - body_top;
+   double lower_wick  = body_bottom - l;
 
-   bool upper_wick_rej = (cls_high >= upper) && (upper_wick > body_size) && (cls_close < upper);
-   bool lower_wick_rej = (cls_low <= lower)  && (lower_wick > body_size) && (cls_close > lower);
+   bool uwr = (h >= upper) && (upper_wick > body_size) && (c < upper);
+   bool lwr = (l <= lower)  && (lower_wick > body_size) && (c > lower);
 
-   string prefix = "dc_" + tn;
-   SigSet(prefix + ".closed_price_zone",     zone);
-   SigSet(prefix + ".closed_upper_wick_rej", upper_wick_rej ? "TRUE" : "FALSE");
-   SigSet(prefix + ".closed_lower_wick_rej", lower_wick_rej ? "TRUE" : "FALSE");
-   SigSet(prefix + ".channel_width",         DoubleToString(width, _Digits));
+   string pfx = "dc_" + tn;
+   SigSet(pfx + ".zone",           zone);
+   SigSet(pfx + ".upper_wick_rej", uwr ? "TRUE" : "FALSE");
+   SigSet(pfx + ".lower_wick_rej", lwr ? "TRUE" : "FALSE");
+   SigSet(pfx + ".width",          DoubleToString(width, _Digits));
 }
 
-void ComputeEMA(int tf_idx, int period, int handle, string indName)
+//--- EMA: price_vs + slope
+void ComputeEMA(int tf_idx, int handle, string indName)
 {
    if(handle == INVALID_HANDLE) return;
    string tn = g_tfNames[tf_idx];
 
    double ema[];
    if(CopyBuffer(handle, 0, 1, 5, ema) < 5) return;
+   // ema[0]=oldest, ema[4]=closed bar
 
-   double cls_close = iClose(_Symbol, g_tfs[tf_idx], 1);
-   double ema_cls   = ema[4];
-   double ema_prev3 = ema[1];
+   double price = iClose(_Symbol, g_tfs[tf_idx], 1);
+   double val   = ema[4];
+   double old   = ema[1];
 
-   string prefix = indName + "_" + tn;
-   SigSet(prefix + ".closed_price_vs_ema", (cls_close >= ema_cls) ? "ABOVE" : "BELOW");
+   string pfx = indName + "_" + tn;
+   SigSet(pfx + ".price_vs", (price >= val) ? "ABOVE" : "BELOW");
 
    string slope = "FLAT";
-   if(ema_cls > ema_prev3 + _Point) slope = "RISING";
-   else if(ema_cls < ema_prev3 - _Point) slope = "FALLING";
-   SigSet(prefix + ".ema_slope", slope);
-   SigSet(prefix + ".ema_value", DoubleToString(ema_cls, _Digits));
+   if(val > old + _Point) slope = "RISING";
+   else if(val < old - _Point) slope = "FALLING";
+   SigSet(pfx + ".slope", slope);
+   SigSet(pfx + ".value", DoubleToString(val, _Digits));
 }
 
+//--- RSI: value + zone
 void ComputeRSI(int tf_idx, int period, int handle, string indName)
 {
    if(handle == INVALID_HANDLE) return;
@@ -682,8 +701,8 @@ void ComputeRSI(int tf_idx, int period, int handle, string indName)
 
    double rsi[];
    if(CopyBuffer(handle, 0, 1, 1, rsi) < 1) return;
-
    double val = rsi[0];
+
    string zone;
    if(period == 2)
    {
@@ -700,11 +719,12 @@ void ComputeRSI(int tf_idx, int period, int handle, string indName)
       else              zone = "NEUTRAL";
    }
 
-   string prefix = indName + "_" + tn;
-   SigSet(prefix + ".closed_rsi",  DoubleToString(val, 2));
-   SigSet(prefix + ".closed_zone", zone);
+   string pfx = indName + "_" + tn;
+   SigSet(pfx + ".value", DoubleToString(val, 2));
+   SigSet(pfx + ".zone",  zone);
 }
 
+//--- ADX: strength + DI bias
 void ComputeADX(int tf_idx)
 {
    int handle = g_h_adx[tf_idx];
@@ -716,23 +736,23 @@ void ComputeADX(int tf_idx)
    if(CopyBuffer(handle, 1, 1, 1, diP) < 1) return;
    if(CopyBuffer(handle, 2, 1, 1, diM) < 1) return;
 
-   double val = adx[0];
    string strength;
-   if(val >= 40)      strength = "STRONG_TREND";
-   else if(val >= 25) strength = "TRENDING";
-   else if(val >= 20) strength = "WEAK_TREND";
-   else               strength = "RANGING";
+   if(adx[0] >= 40)      strength = "STRONG_TREND";
+   else if(adx[0] >= 25) strength = "TRENDING";
+   else if(adx[0] >= 20) strength = "WEAK_TREND";
+   else                   strength = "RANGING";
 
-   string diBias = "NEUTRAL";
-   if(diP[0] > diM[0] + 1) diBias = "BULLISH";
-   else if(diM[0] > diP[0] + 1) diBias = "BEARISH";
+   string bias = "NEUTRAL";
+   if(diP[0] > diM[0] + 1) bias = "BULLISH";
+   else if(diM[0] > diP[0] + 1) bias = "BEARISH";
 
-   string prefix = "adx14_" + tn;
-   SigSet(prefix + ".closed_adx",            DoubleToString(val, 2));
-   SigSet(prefix + ".closed_trend_strength", strength);
-   SigSet(prefix + ".closed_di_bias",        diBias);
+   string pfx = "adx_" + tn;
+   SigSet(pfx + ".value",    DoubleToString(adx[0], 2));
+   SigSet(pfx + ".strength", strength);
+   SigSet(pfx + ".di_bias",  bias);
 }
 
+//--- MACD: cross + histogram direction + vs zero
 void ComputeMACD(int tf_idx)
 {
    int handle = g_h_macd[tf_idx];
@@ -742,20 +762,22 @@ void ComputeMACD(int tf_idx)
    double main[], sig[];
    if(CopyBuffer(handle, 0, 1, 2, main) < 2) return;
    if(CopyBuffer(handle, 1, 1, 2, sig) < 2) return;
-
-   double hist_cls  = main[1] - sig[1];
-   double hist_prev = main[0] - sig[0];
+   // [0]=prev, [1]=closed
 
    string cross = "NONE";
    if(main[1] > sig[1] && main[0] <= sig[0]) cross = "CROSS_UP";
    if(main[1] < sig[1] && main[0] >= sig[0]) cross = "CROSS_DOWN";
 
-   string prefix = "macd12_26_9_" + tn;
-   SigSet(prefix + ".closed_cross",        cross);
-   SigSet(prefix + ".histogram_direction", (hist_cls > hist_prev) ? "RISING" : "FALLING");
-   SigSet(prefix + ".macd_vs_zero",        (main[1] >= 0) ? "ABOVE" : "BELOW");
+   double hist_now  = main[1] - sig[1];
+   double hist_prev = main[0] - sig[0];
+
+   string pfx = "macd_" + tn;
+   SigSet(pfx + ".cross",    cross);
+   SigSet(pfx + ".hist_dir", (hist_now > hist_prev) ? "RISING" : "FALLING");
+   SigSet(pfx + ".vs_zero",  (main[1] >= 0) ? "ABOVE" : "BELOW");
 }
 
+//--- Stochastic: %K + zone
 void ComputeStoch(int tf_idx)
 {
    int handle = g_h_stoch[tf_idx];
@@ -769,11 +791,12 @@ void ComputeStoch(int tf_idx)
    if(k[0] > 80) zone = "OB";
    else if(k[0] < 20) zone = "OS";
 
-   string prefix = "stoch5_3_3_" + tn;
-   SigSet(prefix + ".stoch_k",    DoubleToString(k[0], 2));
-   SigSet(prefix + ".stoch_zone", zone);
+   string pfx = "stoch_" + tn;
+   SigSet(pfx + ".k",    DoubleToString(k[0], 2));
+   SigSet(pfx + ".zone", zone);
 }
 
+//--- Bollinger Bands: squeeze + reenter
 void ComputeBB(int tf_idx)
 {
    int handle = g_h_bb[tf_idx];
@@ -785,30 +808,32 @@ void ComputeBB(int tf_idx)
    if(CopyBuffer(handle, 1, 1, 2, upper) < 2) return;
    if(CopyBuffer(handle, 2, 1, 2, lower) < 2) return;
 
-   double bandwidth = (base[1] > 0) ? (upper[1] - lower[1]) / base[1] : 0;
-   double bw_prev   = (base[0] > 0) ? (upper[0] - lower[0]) / base[0] : 0;
-   bool squeeze = (bw_prev > 0) ? (bandwidth < bw_prev * 0.75) : false;
+   double bw     = (base[1] > 0) ? (upper[1] - lower[1]) / base[1] : 0;
+   double bwPrev = (base[0] > 0) ? (upper[0] - lower[0]) / base[0] : 0;
+   bool squeeze = (bwPrev > 0) && (bw < bwPrev * 0.75);
 
-   double cls_close  = iClose(_Symbol, g_tfs[tf_idx], 1);
-   double prev_close = iClose(_Symbol, g_tfs[tf_idx], 2);
-   bool reenter_below = (prev_close < lower[0]) && (cls_close >= lower[1]);
+   double cls  = iClose(_Symbol, g_tfs[tf_idx], 1);
+   double prev = iClose(_Symbol, g_tfs[tf_idx], 2);
+   bool reenter = (prev < lower[0]) && (cls >= lower[1]);
 
-   string prefix = "bb20d2_" + tn;
-   SigSet(prefix + ".bb_squeeze",                squeeze ? "TRUE" : "FALSE");
-   SigSet(prefix + ".closed_reenter_from_below", reenter_below ? "TRUE" : "FALSE");
+   string pfx = "bb_" + tn;
+   SigSet(pfx + ".squeeze",       squeeze ? "TRUE" : "FALSE");
+   SigSet(pfx + ".reenter_below", reenter ? "TRUE" : "FALSE");
 }
 
-void ComputeATRSignal(int tf_idx)
+//--- ATR: raw value
+void ComputeATR(int tf_idx)
 {
-   int handle = g_h_atr14[tf_idx];
+   int handle = g_h_atr[tf_idx];
    if(handle == INVALID_HANDLE) return;
 
    double atr[];
    if(CopyBuffer(handle, 0, 1, 1, atr) < 1) return;
 
-   SigSet("atr14_" + g_tfNames[tf_idx] + ".closed_atr", DoubleToString(atr[0], _Digits));
+   SigSet("atr_" + g_tfNames[tf_idx] + ".value", DoubleToString(atr[0], _Digits));
 }
 
+//--- VWAP: session-based (from midnight)
 void ComputeVWAP(int tf_idx)
 {
    ENUM_TIMEFRAMES tf = g_tfs[tf_idx];
@@ -837,22 +862,28 @@ void ComputeVWAP(int tf_idx)
    if(cumVol <= 0) return;
 
    double vwap = cumTPV / cumVol;
-   double cls_close = rates[copied - 2].close;
+   double price = rates[copied - 2].close;
 
-   string prefix = "vwap_" + tn;
-   SigSet(prefix + ".closed_price_vs_vwap", (cls_close >= vwap) ? "ABOVE" : "BELOW");
+   string pfx = "vwap_" + tn;
+   SigSet(pfx + ".price_vs", (price >= vwap) ? "ABOVE" : "BELOW");
+   SigSet(pfx + ".value",    DoubleToString(vwap, _Digits));
 }
 
-void ComputeCandle(int tf_idx)
+//--- Candle patterns — reusable for any bar index
+//    prefix="" → closed bar keys (candle_M3.type)
+//    prefix="live_" → running bar keys (candle_M3.live_type)
+void ComputeCandleForBar(int tf_idx, int barIdx, string prefix)
 {
    ENUM_TIMEFRAMES tf = g_tfs[tf_idx];
    string tn = g_tfNames[tf_idx];
    if(tf >= PERIOD_D1) return;
 
-   double o = iOpen(_Symbol, tf, 1);
-   double h = iHigh(_Symbol, tf, 1);
-   double l = iLow(_Symbol, tf, 1);
-   double c = iClose(_Symbol, tf, 1);
+   double o = iOpen(_Symbol, tf, barIdx);
+   double h = iHigh(_Symbol, tf, barIdx);
+   double l = iLow(_Symbol, tf, barIdx);
+   double c = iClose(_Symbol, tf, barIdx);
+
+   if(o == 0 && h == 0 && l == 0 && c == 0) return;
 
    double body_top    = MathMax(o, c);
    double body_bottom = MathMin(o, c);
@@ -865,31 +896,32 @@ void ComputeCandle(int tf_idx)
    double body_safe  = (body_size > _Point) ? body_size : _Point;
    double body_pct   = (body_size / range_safe) * 100.0;
 
-   double upper_wick_ratio = (body_size > _Point) ? (upper_wick / body_safe) : 0;
-   double lower_wick_ratio = (body_size > _Point) ? (lower_wick / body_safe) : 0;
+   double uwr = (body_size > _Point) ? (upper_wick / body_safe) : 0;
+   double lwr = (body_size > _Point) ? (lower_wick / body_safe) : 0;
 
-   string candle_type = "NORMAL";
+   // Type classification
+   string type = "NORMAL";
    if(total_range <= _Point)
-      candle_type = "DOJI";
+      type = "DOJI";
    else if(body_pct >= 80.0)
-      candle_type = "MARUBOZU";
+      type = "MARUBOZU";
    else if(body_pct < 10.0)
-      candle_type = "DOJI";
+      type = "DOJI";
    else if(lower_wick >= 2.0 * body_safe && upper_wick < body_safe)
-      candle_type = "HAMMER";
+      type = "HAMMER";
    else if(upper_wick >= 2.0 * body_safe && lower_wick < body_safe)
-      candle_type = "SHOOTING_STAR";
+      type = "SHOOTING_STAR";
    else if(body_pct < 40.0 && upper_wick > 0.5 * body_safe && lower_wick > 0.5 * body_safe)
-      candle_type = "SPINNING_TOP";
+      type = "SPINNING_TOP";
 
-   string prefix = "candle_" + tn;
-   SigSet(prefix + ".closed_candle_type",       candle_type);
-   SigSet(prefix + ".closed_candle_dir",        (c > o) ? "UP" : (c < o) ? "DOWN" : "DOJI");
-   SigSet(prefix + ".closed_is_bullish",        (c > o) ? "TRUE" : "FALSE");
-   SigSet(prefix + ".closed_is_bearish",        (c < o) ? "TRUE" : "FALSE");
-   SigSet(prefix + ".closed_upper_wick_ratio",  DoubleToString(upper_wick_ratio, 2));
-   SigSet(prefix + ".closed_lower_wick_ratio",  DoubleToString(lower_wick_ratio, 2));
-   SigSet(prefix + ".closed_body_pct",          DoubleToString(body_pct, 1));
+   string pfx = "candle_" + tn + "." + prefix;
+   SigSet(pfx + "type",             type);
+   SigSet(pfx + "dir",              (c > o) ? "UP" : (c < o) ? "DOWN" : "DOJI");
+   SigSet(pfx + "is_bullish",       (c > o) ? "TRUE" : "FALSE");
+   SigSet(pfx + "is_bearish",       (c < o) ? "TRUE" : "FALSE");
+   SigSet(pfx + "upper_wick_ratio", DoubleToString(uwr, 2));
+   SigSet(pfx + "lower_wick_ratio", DoubleToString(lwr, 2));
+   SigSet(pfx + "body_pct",         DoubleToString(body_pct, 1));
 }
 
 //=====================================================================
@@ -919,10 +951,10 @@ string SigGet(string key)
 
 bool ParseCondition(string expr, string &key, string &op, string &val)
 {
-   string wordOps[]   = {" not_in ", " in ", " is "};
-   string wordClean[] = {"not_in",   "in",   "=="};
-
-   for(int i = 0; i < 3; i++)
+   // Word operators (require surrounding spaces)
+   string wordOps[]   = {" not_in ", " in "};
+   string wordClean[] = {"not_in",   "in"};
+   for(int i = 0; i < 2; i++)
    {
       int pos = StringFind(expr, wordOps[i]);
       if(pos > 0)
@@ -936,6 +968,7 @@ bool ParseCondition(string expr, string &key, string &op, string &val)
       }
    }
 
+   // Symbol operators (longest first)
    string symOps[] = {">=", "<=", "!=", "==", ">", "<"};
    for(int i = 0; i < 6; i++)
    {
@@ -961,11 +994,8 @@ bool EvalCondition(string expr)
    string actual = SigGet(key);
    if(actual == "") return false;
 
-   if(op == "==")
-      return StringCompare(actual, val, false) == 0;
-
-   if(op == "!=")
-      return StringCompare(actual, val, false) != 0;
+   if(op == "==") return StringCompare(actual, val, false) == 0;
+   if(op == "!=") return StringCompare(actual, val, false) != 0;
 
    if(op == "in")
    {
@@ -1094,9 +1124,7 @@ double CalcLotSize(double riskPct, double sl_dollars)
    double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
 
-   if(lotStep > 0)
-      lot = MathFloor(lot / lotStep) * lotStep;
-
+   if(lotStep > 0) lot = MathFloor(lot / lotStep) * lotStep;
    lot = MathMax(lot, minLot);
    lot = MathMin(lot, maxLot);
 
@@ -1118,47 +1146,41 @@ void ManageTrailingStop()
       double entry = PositionGetDouble(POSITION_PRICE_OPEN);
       double sl    = PositionGetDouble(POSITION_SL);
       double tp    = PositionGetDouble(POSITION_TP);
-      long   type  = PositionGetInteger(POSITION_TYPE);
+      long   posType = PositionGetInteger(POSITION_TYPE);
 
       MqlTick tick;
       if(!SymbolInfoTick(_Symbol, tick)) return;
 
-      if(type == POSITION_TYPE_BUY)
+      if(posType == POSITION_TYPE_BUY)
       {
          double profit = tick.bid - entry;
 
          if(INP_BreakevenStart > 0 && profit >= INP_BreakevenStart && sl < entry)
          {
             double newSL = NormalizeDouble(entry + _Point, _Digits);
-            if(newSL > sl)
-               g_trade.PositionModify(ticket, newSL, tp);
+            if(newSL > sl) g_trade.PositionModify(ticket, newSL, tp);
             continue;
          }
-
          if(INP_TrailStart > 0 && profit >= INP_TrailStart)
          {
             double newSL = NormalizeDouble(tick.bid - INP_TrailStep, _Digits);
-            if(newSL > sl)
-               g_trade.PositionModify(ticket, newSL, tp);
+            if(newSL > sl) g_trade.PositionModify(ticket, newSL, tp);
          }
       }
-      else if(type == POSITION_TYPE_SELL)
+      else if(posType == POSITION_TYPE_SELL)
       {
          double profit = entry - tick.ask;
 
          if(INP_BreakevenStart > 0 && profit >= INP_BreakevenStart && (sl > entry || sl == 0))
          {
             double newSL = NormalizeDouble(entry - _Point, _Digits);
-            if(newSL < sl || sl == 0)
-               g_trade.PositionModify(ticket, newSL, tp);
+            if(newSL < sl || sl == 0) g_trade.PositionModify(ticket, newSL, tp);
             continue;
          }
-
          if(INP_TrailStart > 0 && profit >= INP_TrailStart)
          {
             double newSL = NormalizeDouble(tick.ask + INP_TrailStep, _Digits);
-            if(newSL < sl || sl == 0)
-               g_trade.PositionModify(ticket, newSL, tp);
+            if(newSL < sl || sl == 0) g_trade.PositionModify(ticket, newSL, tp);
          }
       }
    }
@@ -1175,8 +1197,7 @@ int CountOpenPositions()
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      if(PositionGetInteger(POSITION_MAGIC) == INP_Magic)
-         count++;
+      if(PositionGetInteger(POSITION_MAGIC) == INP_Magic) count++;
    }
    return count;
 }
@@ -1220,8 +1241,6 @@ void WriteStatusFile()
    FileWrite(handle, "symbol",          _Symbol);
    FileWrite(handle, "server_time",     TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS));
    FileWrite(handle, "trading_enabled", g_tradingEnabled ? "true" : "false");
-   FileWrite(handle, "buy_enabled",     g_buyEnabled ? "true" : "false");
-   FileWrite(handle, "sell_enabled",    g_sellEnabled ? "true" : "false");
    FileWrite(handle, "positions",       IntegerToString(CountOpenPositions()));
    FileWrite(handle, "daily_trades",    IntegerToString(g_dailyTradeCount));
    FileWrite(handle, "total_trades",    IntegerToString(g_totalTrades));
