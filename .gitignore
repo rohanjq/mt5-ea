@@ -1,0 +1,6 @@
+*.ex5
+*.ex4
+__pycache__/
+.DS_Store
+*.pyc
+.venv/
