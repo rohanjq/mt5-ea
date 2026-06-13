@@ -1086,6 +1086,10 @@ void ExecuteTrade(int stratIdx, ENUM_ORDER_TYPE type)
                " TP=", DoubleToString(tp, _Digits),
                " [", g_strats[stratIdx].name, "]");
       }
+      else
+      {
+         g_lastTradeTime = TimeCurrent();  // prevent retry spam on failure
+      }
    }
    else
    {
@@ -1102,6 +1106,10 @@ void ExecuteTrade(int stratIdx, ENUM_ORDER_TYPE type)
                " SL=", DoubleToString(sl, _Digits),
                " TP=", DoubleToString(tp, _Digits),
                " [", g_strats[stratIdx].name, "]");
+      }
+      else
+      {
+         g_lastTradeTime = TimeCurrent();  // prevent retry spam on failure
       }
    }
 }
