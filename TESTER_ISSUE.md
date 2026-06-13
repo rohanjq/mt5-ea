@@ -53,7 +53,7 @@ ForwardMode=0
 Deposit=10000
 Currency=USD
 ProfitInPips=0
-Leverage=100
+Leverage=1:100
 ExecutionMode=0
 OptimizationCriterion=0
 Visual=0
@@ -163,6 +163,7 @@ The broker (PXBT Trading) sets `SYMBOL_TRADE_MODE` to `SYMBOL_TRADE_MODE_CLOSEON
 | 8 | Seed desktop `symbols.dat` into container before launch | File is correct on disk (176KB) but terminal overrides in memory when connecting to broker |
 | 9 | Clean agent bases cache before each run | Still 10044 |
 | 10 | Add `KeepPrivate=1` to preserve password | No effect on 10044 |
+| 11 | Add `[Experts] AllowLiveTrading=0` section (per official docs example) | No effect — `[Experts]` controls live chart EA trading, not the strategy tester |
 
 ## Key Observations
 
@@ -180,6 +181,18 @@ The broker (PXBT Trading) sets `SYMBOL_TRADE_MODE` to `SYMBOL_TRADE_MODE_CLOSEON
 3. **Is there a way to prevent MT5 terminal from overwriting cached symbol specs when connecting during weekends?**
 4. **Can Wine/headless MT5 be configured to use offline/cached specs instead of fetching from broker?**
 5. **Are there known workarounds for brokers that set CLOSEONLY during market-closed hours in the context of backtesting?**
+
+## Conclusion
+
+The config structure is correct per official MetaTrader 5 docs and matches what other users successfully use on Windows. The 10044 error is caused by the broker sending `SYMBOL_TRADE_MODE_CLOSEONLY` during weekends/market-closed hours. The strategy tester inherits this restriction from the live broker connection and applies it to all simulated trades regardless of the historical date being tested.
+
+**The only reliable workaround is to run backtests during market hours** (Sunday ~5pm ET through Friday ~5pm ET). Desktop appears to work during weekends only because it cached the `SYMBOL_TRADE_MODE_FULL` spec from when the terminal was started during market hours.
+
+References:
+- [Official MT5 config docs](https://www.metatrader5.com/en/terminal/help/start_advanced/start)
+- [MQL5 Forum: CLI backtesting](https://www.mql5.com/en/forum/127577/page2)
+- [MQL5 Forum: Command line backtesting](https://www.mql5.com/en/forum/462397)
+- [MQL5 Custom Symbols API](https://www.mql5.com/en/docs/customsymbols) (potential future workaround)
 
 ## Files
 
