@@ -320,6 +320,14 @@ int OnInit()
          " | Risk: ", INP_RiskPct, "%",
          " | Magic: ", INP_Magic);
 
+   // Debug: log symbol trade mode to diagnose 10044 close-only errors
+   ENUM_SYMBOL_TRADE_MODE tradeMode = (ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   Print("DEBUG SYMBOL_TRADE_MODE=", EnumToString(tradeMode),
+         " ACCOUNT=", AccountInfoInteger(ACCOUNT_LOGIN),
+         " SERVER=", AccountInfoString(ACCOUNT_SERVER),
+         " TRADE_ALLOWED=", AccountInfoInteger(ACCOUNT_TRADE_ALLOWED),
+         " TRADE_EXPERT=", AccountInfoInteger(ACCOUNT_TRADE_EXPERT));
+
    return INIT_SUCCEEDED;
 }
 
