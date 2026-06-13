@@ -128,26 +128,17 @@ Trades   2026.06.06 03:13:20  market buy 1 XAUUSD ... [done at 4274.42]
 (trades execute successfully)
 ```
 
-## Root Cause (Suspected)
+## Root Cause (Confirmed)
 
-The broker (PXBT Trading) sets `SYMBOL_TRADE_MODE` to `SYMBOL_TRADE_MODE_CLOSEONLY` for XAUUSD during weekends/market-closed hours. When the VPS terminal starts:
+The broker (PXBT Trading) sets `SYMBOL_TRADE_MODE` to `SYMBOL_TRADE_MODE_CLOSEONLY` for XAUUSD during weekends/market-closed hours. **Any** fresh login (cold start) during this time — on Windows OR Wine — receives this restriction, and the strategy tester applies it to all simulated trades.
 
-1. Terminal connects to broker via `[Common]` credentials
-2. Broker sends current symbol specification with `SYMBOL_TRADE_MODE_CLOSEONLY`
-3. Terminal passes this spec to the tester agent
-4. Agent applies this restriction to the ENTIRE historical backtest
-5. Every order is rejected with 10044
+**Confirmed on Windows desktop:** Cold-starting `terminal64.exe /config:master_tester.ini` (with `[Common]` section) on Windows with no terminal running produces the **exact same 10044 error**. This is NOT a Wine/Docker issue.
 
-**Desktop works because:**
-- Terminal was started during market hours (spec = `SYMBOL_TRADE_MODE_FULL`)
-- The spec is cached in memory while the terminal runs
-- Tester uses the cached in-memory spec, not a fresh broker download
-- Desktop's `working.ini` has no `[Common]` — it reuses the running terminal's session
-
-**VPS fails because:**
-- Container starts fresh each time → fresh broker connection → fresh spec download
-- During weekends, broker returns CLOSEONLY → tester gets CLOSEONLY
-- Even seeding `symbols.dat` from desktop doesn't help — live broker connection overrides cached file in memory
+**Why desktop `working.ini` works:**
+- It has NO `[Common]` section
+- It requires an already-running terminal (started during market hours)
+- The running terminal has `SYMBOL_TRADE_MODE_FULL` cached in memory from the last market-hours connection
+- The tester reuses that cached spec
 
 ## What We Tried
 
@@ -164,6 +155,7 @@ The broker (PXBT Trading) sets `SYMBOL_TRADE_MODE` to `SYMBOL_TRADE_MODE_CLOSEON
 | 9 | Clean agent bases cache before each run | Still 10044 |
 | 10 | Add `KeepPrivate=1` to preserve password | No effect on 10044 |
 | 11 | Add `[Experts] AllowLiveTrading=0` section (per official docs example) | No effect — `[Experts]` controls live chart EA trading, not the strategy tester |
+| 12 | Cold-start on **Windows desktop** with `[Common]` + `[Tester]` (no terminal running) | **SAME 10044 on Windows** — proves this is NOT a Wine/Docker issue |
 
 ## Key Observations
 
@@ -184,9 +176,14 @@ The broker (PXBT Trading) sets `SYMBOL_TRADE_MODE` to `SYMBOL_TRADE_MODE_CLOSEON
 
 ## Conclusion
 
-The config structure is correct per official MetaTrader 5 docs and matches what other users successfully use on Windows. The 10044 error is caused by the broker sending `SYMBOL_TRADE_MODE_CLOSEONLY` during weekends/market-closed hours. The strategy tester inherits this restriction from the live broker connection and applies it to all simulated trades regardless of the historical date being tested.
+**Confirmed: NOT a Wine/Docker/config issue.** The same 10044 error occurs on native Windows when cold-starting with `[Common]` during weekends. The broker sends `SYMBOL_TRADE_MODE_CLOSEONLY` on any fresh connection during market-closed hours, and the tester inherits this restriction.
 
-**The only reliable workaround is to run backtests during market hours** (Sunday ~5pm ET through Friday ~5pm ET). Desktop appears to work during weekends only because it cached the `SYMBOL_TRADE_MODE_FULL` spec from when the terminal was started during market hours.
+**Working approach:** The terminal must already be running with cached `SYMBOL_TRADE_MODE_FULL` spec (from a market-hours session), then start the test with a config that has NO `[Common]` section.
+
+**Possible VPS solutions:**
+1. **Schedule tests during market hours only** (Sunday ~5pm ET through Friday ~5pm ET)
+2. **Keep terminal running from market hours**, then feed tester config without `[Common]` to the existing process
+3. **Custom symbol workaround** — create a custom symbol with `SYMBOL_TRADE_MODE_FULL` forced via MQL5 `CustomSymbolSetInteger()`
 
 References:
 - [Official MT5 config docs](https://www.metatrader5.com/en/terminal/help/start_advanced/start)
